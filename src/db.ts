@@ -32,5 +32,9 @@ export function initSchema(): void {
 
     CREATE INDEX IF NOT EXISTS idx_orders_merchant ON orders(merchant_id);
     CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at);
+    CREATE INDEX IF NOT EXISTS idx_orders_search
+      ON orders(merchant_id, COALESCE(julianday(created_at), 0) DESC, id DESC);
+    CREATE INDEX IF NOT EXISTS idx_orders_search_email
+      ON orders(merchant_id, customer_email COLLATE NOCASE, COALESCE(julianday(created_at), 0) DESC, id DESC);
   `);
 }

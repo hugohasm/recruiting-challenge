@@ -8,6 +8,7 @@ The dashboard is served at `/`, and the application API is under `/api`.
 |---|---|---|---|
 | GET | `/api/health` | No | `200` |
 | GET | `/api/orders` | Yes | `200` |
+| GET | `/api/orders/search` | Yes | `200` |
 | GET | `/api/orders/:id` | Yes | `200` |
 | POST | `/api/orders` | Yes | `201` |
 | GET | `/api/revenue` | Yes | `200` |
@@ -50,13 +51,14 @@ provide that protection.
 
 ## Errors and routing
 
-Application error bodies have an `error` string. Only `missing_date_range`
-adds a `detail` field.
+Application error bodies have an `error` string. `missing_date_range` and
+`invalid_search_query` also include a human-readable `detail` field.
 
 | HTTP status | JSON body | When it occurs |
 |---|---|---|
 | `400` | `{"error":"invalid_body"}` | Invalid order-creation payload, or a JSON parsing error from the global body parser. |
 | `400` | `{"error":"missing_date_range","detail":"from and to are required (YYYY-MM-DD)"}` | Revenue request with a missing, empty or non-string `from` or `to`. |
+| `400` | `{"error":"invalid_search_query","detail":"..."}` | Invalid search filter, range, pagination value or unsupported/repeated query parameter on `/api/orders/search`. |
 | `401` | `{"error":"missing_merchant_id"}` | Missing or empty merchant header on a protected resource. |
 | `401` | `{"error":"invalid_merchant_id"}` | Merchant header has an invalid format or does not match a stored merchant. |
 | `404` | `{"error":"not_found"}` | No order with that ID belongs to the selected merchant. |
@@ -111,14 +113,18 @@ formats amounts as USD.
 - Seeded orders use ISO UTC strings, for example `2026-11-01T12:00:00.000Z`.
 - The API returns these strings as stored. There is no uniform timestamp
   serialization or timezone conversion in the routes.
-- Date filtering compares stored text using `created_at >= from` and
+- The legacy list (`GET /api/orders`) and revenue endpoint compare stored text using `created_at >= from` and
   `created_at < to`. `from` is inclusive; `to` is exclusive. A date-only `to`
   excludes orders on that date.
-- The documented request convention is `YYYY-MM-DD`, but the routes do not
+- For those two endpoints the request convention is `YYYY-MM-DD`, but they do not
   validate calendar dates, normalize timestamps or verify that `from < to`.
   Mixed stored timestamp formats can affect comparisons and sorting. Do not
   assume arbitrary timestamp/timezone inputs are normalized to equivalent
   instants.
+- `GET /api/orders/search` validates real `YYYY-MM-DD` dates, treats bounds as
+  UTC midnight and normalizes stored timestamps with SQLite `julianday` for
+  filtering and sorting. It supports either bound independently. This also
+  handles the two timestamp formats above consistently without rewriting rows.
 
 The examples below use illustrative data: a sale of 10000 cents and a refund
 of 2000 cents for `buyer@example.com` in `m_acme`, on November 1 and 2, 2026.
@@ -141,6 +147,7 @@ global parsing/error behavior described above still applies if a body is sent.
 ## GET /api/orders
 
 Lists orders belonging to the merchant selected by `X-Merchant-Id`.
+The dashboard uses the separate [search endpoint](#get-apiorderssearch) below.
 
 | Query parameter | Required | Default | Current behavior |
 |---|---|---|---|
@@ -186,6 +193,90 @@ For `?from=2026-11-01&to=2026-11-02&limit=10`:
 **Errors:** `401 missing_merchant_id`, `401 invalid_merchant_id`, and
 `500 internal_error` for query failures such as invalid limits. Global JSON
 parsing failures can also return `400 invalid_body`.
+
+## GET /api/orders/search
+
+Searches only orders owned by the merchant selected by `X-Merchant-Id`.
+All filters are optional and combined with **AND**. No request body is needed.
+
+| Query parameter | Default | Accepted values and behavior |
+|---|---|---|
+| `customer_email` | No filter | Exact email match, case-insensitive for ASCII letters. Same email syntax validation as POST; not a substring or wildcard search. The query is lowercased; stored emails are returned unchanged. |
+| `status` | No filter | Exact, case-sensitive stored status. Must match `^[A-Za-z][A-Za-z0-9_-]{0,63}$`. Unknown well-formed statuses produce no matches. POST still only supports creating `completed` orders. |
+| `type` | No filter | `sale` or `refund`, case-sensitive. |
+| `from` | No lower bound | Valid calendar date `YYYY-MM-DD`, inclusive from midnight UTC. |
+| `to` | No upper bound | Valid calendar date `YYYY-MM-DD`, exclusive before midnight UTC. When both dates are supplied, `from` must be earlier than `to`. |
+| `min_amount` | No lower bound | Inclusive minimum stored amount, in **cents**. Digits only, integer between `0` and `9007199254740991`. |
+| `max_amount` | No upper bound | Inclusive maximum in **cents**, with the same validation. Must be at least `min_amount` if both are supplied. |
+| `limit` | `20` | Digits only, integer between `1` and `100`. |
+| `cursor` | First page | Opaque `next_cursor` from a previous response with the same merchant and filters. |
+
+Do not send empty filters. Repeated keys, arrays/objects, unknown parameters
+(including `merchant_id`, `page`, `offset` and `sort`), invalid values and invalid
+ranges return `400 invalid_search_query`; they are not silently ignored.
+Percent-encode query values, especially an email containing `+` or `&`.
+
+Amount filters compare the positive stored amount of both sales and refunds;
+they do not turn refunds into negative values or filter net revenue.
+`min_amount=500&max_amount=500` finds orders of exactly 500 cents.
+`from=2026-11-01&to=2026-11-03` includes November 1 and 2 in UTC.
+
+**Ordering and pagination:** newest timestamp first, then `id` descending for
+equal instants. Both SQLite and ISO timestamp formats are normalized for this
+comparison. Rows with unparseable timestamps sort last and are excluded when
+either date bound is present. Returned `created_at` strings remain unchanged.
+
+The response has up to `limit` rows and a cursor for the next page, or `null`
+when there are no more matches. Continue with the same filters and merchant,
+adding the returned cursor; `limit` may change. Changing filters or merchants
+requires starting again without a cursor. Malformed or incompatible cursors
+return `400`. The cursor is not an authentication token or a signed credential;
+the database query always enforces the header's merchant scope.
+
+Pagination does not return a total count, numeric page offset or previous
+cursor. The dashboard keeps cursor history for its Previous button. There is
+no snapshot across requests: newly inserted orders ahead of the cursor appear
+after restarting the search, and inserted older rows may appear on later pages.
+
+**Success: `200`**. Example with `type=refund&min_amount=2000&max_amount=2000`:
+
+```json
+{
+  "orders": [
+    {
+      "id": "22222222-2222-4222-8222-222222222222",
+      "merchant_id": "m_acme",
+      "customer_email": "buyer@example.com",
+      "total_amount": 2000,
+      "type": "refund",
+      "status": "completed",
+      "created_at": "2026-11-02 12:00:00"
+    }
+  ],
+  "pagination": { "limit": 20, "next_cursor": null }
+}
+```
+
+No matches, including an existing merchant with no orders, return `200` with
+`{"orders":[],"pagination":{"limit":20,"next_cursor":null}}` for the default limit.
+
+```sh
+curl --get 'http://localhost:3000/api/orders/search' \
+  -H 'X-Merchant-Id: m_acme' \
+  --data-urlencode 'customer_email=buyer@example.com' \
+  --data-urlencode 'status=completed' \
+  --data-urlencode 'type=sale' \
+  --data-urlencode 'from=2026-11-01' \
+  --data-urlencode 'to=2026-11-03' \
+  --data-urlencode 'min_amount=1000' \
+  --data-urlencode 'max_amount=15000' \
+  --data-urlencode 'limit=20'
+```
+
+**Errors:** `400 invalid_search_query` with a `detail`, `401 missing_merchant_id`,
+`401 invalid_merchant_id`, and global `400 invalid_body` / `500 internal_error`.
+An empty search is not a `404`. The literal `search` path is reserved for this
+endpoint and takes precedence over the `/:id` route.
 
 ## GET /api/orders/:id
 

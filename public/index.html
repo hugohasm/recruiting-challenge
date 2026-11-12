@@ -17,6 +17,12 @@
       th, td { text-align: left; padding: 0.5rem; border-bottom: 1px solid #ccc4; }
       th { font-weight: 600; opacity: 0.8; }
       .muted { opacity: 0.6; }
+      .filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 0.75rem; }
+      .filters label { display: flex; flex-direction: column; gap: 0.25rem; }
+      input, select, button { font: inherit; padding: 0.4rem; }
+      .filter-actions, .pagination { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
+      .table-scroll { overflow-x: auto; }
+      td { overflow-wrap: anywhere; }
     </style>
   </head>
   <body>
@@ -40,16 +46,49 @@
         <div class="card"><div class="label">Avg order value</div><div class="value" id="avg-order">—</div></div>
         <div class="card"><div class="label">Revenue (last 30 days)</div><div class="value" id="revenue-30d">—</div></div>
       </div>
+      <p class="muted">Summary covers this merchant; order search filters apply only to the table.</p>
+      <p id="summary-message" role="status"></p>
     </section>
 
     <section>
-      <h2>Recent orders</h2>
-      <table>
+      <h2>Order search</h2>
+      <form id="order-search-form">
+        <div class="filters">
+          <label>Customer email (exact)
+            <input name="customer_email" type="email" maxlength="254" placeholder="buyer@example.com" />
+          </label>
+          <label>Status (exact)
+            <input name="status" list="order-statuses" maxlength="64" placeholder="Any status" pattern="[A-Za-z][A-Za-z0-9_\-]*" />
+            <datalist id="order-statuses"><option value="completed"></option></datalist>
+          </label>
+          <label>Type
+            <select name="type"><option value="">All types</option><option value="sale">Sale</option><option value="refund">Refund</option></select>
+          </label>
+          <label>From (UTC, inclusive)<input name="from" type="date" /></label>
+          <label>Before (UTC, exclusive)<input name="to" type="date" /></label>
+          <label>Minimum amount (USD)<input name="min_amount" type="number" min="0" step="0.01" placeholder="0.00" /></label>
+          <label>Maximum amount (USD)<input name="max_amount" type="number" min="0" step="0.01" placeholder="100.00" /></label>
+        </div>
+        <div class="filter-actions">
+          <button type="submit">Search orders</button>
+          <button type="button" id="clear-filters">Clear filters</button>
+        </div>
+      </form>
+      <p class="muted">Newest first; 20 per page. Amount bounds are inclusive. Refund amounts are positive.</p>
+      <p id="orders-message" role="status" aria-live="polite"></p>
+      <div class="table-scroll">
+      <table aria-label="Order search results" aria-describedby="orders-message" id="orders-table">
         <thead>
-          <tr><th>Date</th><th>Customer</th><th>Type</th><th>Amount</th></tr>
+          <tr><th>Date (UTC)</th><th>Customer</th><th>Status</th><th>Type</th><th>Amount</th></tr>
         </thead>
         <tbody id="orders-tbody"></tbody>
       </table>
+      </div>
+      <nav class="pagination" aria-label="Order search pages">
+        <button type="button" id="previous-page" disabled>Previous</button>
+        <span id="page-info"></span>
+        <button type="button" id="next-page" disabled>Next</button>
+      </nav>
     </section>
 
     <script src="/app.js"></script>

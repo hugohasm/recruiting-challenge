@@ -37,10 +37,27 @@ If port 3000 is taken: `PORT=3055 npm run dev`.
 The database is SQLite, kept in `data/dashboard.db`. The first run seeds two merchants (`m_acme`, `m_bistro`) and ~80 orders. Delete the file to reseed.
 
 ```sh
-npm test     # run the (intentionally thin) test suite
+npm test     # run API/DAL and dashboard regressions; API/DAL use an in-memory database
+npm run build
 ```
 
 To switch between the two seeded merchants in the dashboard, use the selector at the top of the page. Behind the scenes the client sends an `X-Merchant-Id` header on every API request — see `src/auth.ts`.
+
+### Order search (Feature C)
+
+The dashboard's Order search form combines exact customer email (case-insensitive),
+exact status, sale/refund type, UTC dates and amount bounds. Dates use an inclusive
+From and exclusive Before; enter the following day to include an entire final day.
+Amounts in the UI are USD with up to two decimal places and are sent to the API
+as integer cents. Both amount bounds are inclusive, including for refunds.
+
+Results show newest orders first, with descending ID as the timestamp tie-breaker.
+Use Next/Previous for 20-row pages; Search, Clear filters and merchant changes
+restart pagination. Summary cards describe the merchant, independently of search
+filters. Loading, empty and error states appear above the results table.
+
+The endpoint is `GET /api/orders/search`; see [the API contract](docs/api.md#get-apiorderssearch)
+for filters, cursor pagination, validation errors and the limits of demo authentication.
 
 ---
 

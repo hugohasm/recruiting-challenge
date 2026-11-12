@@ -10,6 +10,21 @@ export interface OrderRow {
   created_at: string;
 }
 
+export interface OrderSearchFilters {
+  customerEmail?: string;
+  status?: string;
+  type?: 'sale' | 'refund';
+  from?: string;
+  to?: string;
+  minAmount?: number;
+  maxAmount?: number;
+}
+
+export interface OrderSearchCursor {
+  createdAt: number;
+  id: string;
+}
+
 /**
  * Data-access layer for orders. All order queries should go through here.
  *
@@ -18,6 +33,60 @@ export interface OrderRow {
  * - the seam for swapping the underlying store
  */
 export const ordersDal = {
+  searchByMerchant(merchantId: string, filters: OrderSearchFilters, limit: number, cursor?: OrderSearchCursor) {
+    const time = 'COALESCE(julianday(created_at), 0)';
+    const conditions = ['merchant_id = ?'];
+    const values: Array<string | number> = [merchantId];
+    if (filters.customerEmail !== undefined) {
+      conditions.push('customer_email = ? COLLATE NOCASE');
+      values.push(filters.customerEmail);
+    }
+    if (filters.status !== undefined) {
+      conditions.push('status = ?');
+      values.push(filters.status);
+    }
+    if (filters.type !== undefined) {
+      conditions.push('type = ?');
+      values.push(filters.type);
+    }
+    if (filters.from !== undefined || filters.to !== undefined) {
+      conditions.push('julianday(created_at) IS NOT NULL');
+    }
+    if (filters.from !== undefined) {
+      conditions.push(`${time} >= julianday(?)`);
+      values.push(filters.from);
+    }
+    if (filters.to !== undefined) {
+      conditions.push(`${time} < julianday(?)`);
+      values.push(filters.to);
+    }
+    if (filters.minAmount !== undefined) {
+      conditions.push('total_amount >= ?');
+      values.push(filters.minAmount);
+    }
+    if (filters.maxAmount !== undefined) {
+      conditions.push('total_amount <= ?');
+      values.push(filters.maxAmount);
+    }
+    if (cursor) {
+      // The explicit time bound lets SQLite seek into the expression index.
+      conditions.push(`${time} <= ? AND (${time}, id) < (?, ?)`);
+      values.push(cursor.createdAt, cursor.createdAt, cursor.id);
+    }
+    const rows = db.prepare(`
+      SELECT *, ${time} AS search_time FROM orders
+      WHERE ${conditions.join(' AND ')}
+      ORDER BY ${time} DESC, id DESC LIMIT ?
+    `).all(...values, limit + 1) as Array<OrderRow & { search_time: number }>;
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const last = page[page.length - 1];
+    return {
+      orders: page.map(({ search_time, ...order }) => order),
+      nextCursor: hasMore && last ? { createdAt: last.search_time, id: last.id } : null,
+    };
+  },
+
   listByMerchant(merchantId: string, opts: { from?: string; to?: string; limit?: number } = {}): OrderRow[] {
     const limit = opts.limit ?? 100;
     if (opts.from && opts.to) {
