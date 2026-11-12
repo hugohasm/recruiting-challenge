@@ -21,6 +21,9 @@ Two tables: `merchants`, `orders`. See `db.ts` for the canonical DDL.
 
 `orders.type` is one of `'sale' | 'refund'`. A refund row records that a sale
 was reversed; it does not by itself reverse the sale row.
+Both types use positive integer amounts in cents. The revenue endpoint subtracts
+refunds from sales within the requested merchant and date range. Order creation
+currently supports only the `completed` status.
 
 ## Open items
 

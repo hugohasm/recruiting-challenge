@@ -2,6 +2,18 @@ import { Router } from 'express';
 import { ordersDal } from '../dal/orders-dal.js';
 import { randomUUID } from 'node:crypto';
 
+function isValidEmail(value: unknown): value is string {
+  if (typeof value !== 'string' || value.length > 254 || /\s/.test(value)) return false;
+  const [local, domain, ...extra] = value.split('@');
+  if (!local || !domain || extra.length > 0 || local.length > 64) return false;
+
+  const validLocal = local.split('.').every((part) => /^[A-Za-z0-9!#$%&'*+/=?^_`{|}~-]+$/.test(part));
+  const labels = domain.split('.');
+  return validLocal && labels.length >= 2 && labels.every((label) =>
+    label.length <= 63 && /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/.test(label),
+  );
+}
+
 export const ordersRouter = Router();
 
 ordersRouter.get('/', (req, res) => {
@@ -23,22 +35,25 @@ ordersRouter.get('/:id', (req, res) => {
 });
 
 ordersRouter.post('/', (req, res) => {
-  const body = req.body as {
-    customer_email?: string;
-    total_amount?: number;
-    type?: 'sale' | 'refund';
-  };
-  if (!body.customer_email || typeof body.total_amount !== 'number') {
+  const body: unknown = req.body;
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) {
+    res.status(400).json({ error: 'invalid_body' });
+    return;
+  }
+  const { customer_email, total_amount, type = 'sale', status = 'completed' } = body as Record<string, unknown>;
+  if (!isValidEmail(customer_email) ||
+      typeof total_amount !== 'number' || !Number.isSafeInteger(total_amount) || total_amount <= 0 ||
+      (type !== 'sale' && type !== 'refund') || status !== 'completed') {
     res.status(400).json({ error: 'invalid_body' });
     return;
   }
   const order = ordersDal.create({
     id: randomUUID(),
     merchant_id: req.merchantId!,
-    customer_email: body.customer_email,
-    total_amount: body.total_amount,
-    type: body.type ?? 'sale',
-    status: 'completed',
+    customer_email,
+    total_amount,
+    type,
+    status,
   });
   res.status(201).json({ order });
 });

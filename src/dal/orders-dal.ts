@@ -50,13 +50,18 @@ export const ordersDal = {
   },
 
   /**
-   * Sum total_amount over a date range for a merchant.
+   * Net revenue in cents: sales minus refunds over a date range for a merchant.
+   * Both types store positive total_amount values.
    * Used by the revenue endpoint.
    */
   sumAmountByMerchant(merchantId: string, from: string, to: string): number {
     const row = db
       .prepare(
-        `SELECT COALESCE(SUM(total_amount), 0) AS total
+        `SELECT COALESCE(SUM(CASE type
+           WHEN 'sale' THEN total_amount
+           WHEN 'refund' THEN -total_amount
+           ELSE 0
+         END), 0) AS total
          FROM orders
          WHERE merchant_id = ? AND created_at >= ? AND created_at < ?`,
       )
