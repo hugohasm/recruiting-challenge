@@ -60,3 +60,28 @@ test('revenue DAL: each refund reduces net revenue by exactly its positive cent 
     assert.ok(afterRefund < beforeRefund);
   }
 });
+
+test('revenue DAL: splitting refunds and reversing insertion order preserve net cents', () => {
+  const sales = [10001, 99, 2500];
+  const partitions = [[3000], [1, 99, 2900], [1500, 1500]];
+  const insert = db.prepare(`
+    INSERT INTO orders (id, merchant_id, type, total_amount, created_at, customer_email, status)
+    VALUES (?, ?, ?, ?, '2026-03-01T12:00:00.000Z', 'shared@example.com', 'completed')
+  `);
+  let scenario = 0;
+  for (const refunds of partitions) {
+    for (const reverse of [false, true]) {
+      const merchantId = `m_partition_${scenario++}`;
+      db.prepare('INSERT INTO merchants (id, name) VALUES (?, ?)').run(merchantId, merchantId);
+      const movements = [
+        ...sales.map((amount) => ({ type: 'sale', amount })),
+        ...refunds.map((amount) => ({ type: 'refund', amount })),
+      ];
+      if (reverse) movements.reverse();
+      movements.forEach((movement, index) => {
+        insert.run(`${merchantId}_${index}`, merchantId, movement.type, movement.amount);
+      });
+      assert.equal(ordersDal.sumAmountByMerchant(merchantId, '2026-03-01', '2026-03-02'), 9600);
+    }
+  }
+});

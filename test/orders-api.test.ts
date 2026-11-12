@@ -66,6 +66,10 @@ async function request(
   return { status: response.status, body: await response.json() };
 }
 
+function ordersSnapshot() {
+  return db.prepare('SELECT * FROM orders ORDER BY id').all();
+}
+
 for (const [merchantId, otherMerchantId] of [['m_acme', 'm_bistro'], ['m_bistro', 'm_acme']] as const) {
   test(`orders API: ${merchantId} can read its own order`, async () => {
     const { status, body } = await request(`/api/orders/o_${merchantId}`, merchantId);
@@ -94,12 +98,12 @@ for (const merchantId of [undefined, '', '   ', 'm_unknown', 'm acme', 'm_acme,m
 }
 
 test('orders API: an unknown merchant cannot list or create orders', async () => {
-  const countBefore = db.prepare('SELECT COUNT(*) AS n FROM orders').get();
+  const ordersBefore = ordersSnapshot();
   for (const method of ['GET', 'POST']) {
     const result = await request('/api/orders', 'm_unknown', method);
     assert.deepEqual(result, { status: 401, body: { error: 'invalid_merchant_id' } });
   }
-  assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM orders').get(), countBefore);
+  assert.deepEqual(ordersSnapshot(), ordersBefore);
 });
 
 test('orders API: a newly created order is readable only by its merchant', async () => {
@@ -158,18 +162,18 @@ const invalidPayloads: Array<[string, unknown]> = [
 ];
 
 for (const [name, payload] of invalidPayloads) {
-  test(`orders API: rejects ${name} without inserting an order`, async () => {
-    const countBefore = db.prepare('SELECT COUNT(*) AS n FROM orders').get();
+  test(`orders API: rejects ${name} without changing stored orders`, async () => {
+    const ordersBefore = ordersSnapshot();
     assert.deepEqual(await request('/api/orders', 'm_acme', 'POST', payload), {
       status: 400,
       body: { error: 'invalid_body' },
     });
-    assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM orders').get(), countBefore);
+    assert.deepEqual(ordersSnapshot(), ordersBefore);
   });
 }
 
 test('orders API: malformed JSON, primitives and non-finite amounts return 400', async () => {
-  const countBefore = db.prepare('SELECT COUNT(*) AS n FROM orders').get();
+  const ordersBefore = ordersSnapshot();
   for (const body of ['{', 'true', '42', '"text"', '{"customer_email":"buyer@example.com","total_amount":1e400}']) {
     const response = await fetch(`${origin}/api/orders`, {
       method: 'POST',
@@ -180,7 +184,7 @@ test('orders API: malformed JSON, primitives and non-finite amounts return 400',
     assert.equal(response.status, 400, body);
     assert.deepEqual(await response.json(), { error: 'invalid_body' });
   }
-  assert.deepEqual(db.prepare('SELECT COUNT(*) AS n FROM orders').get(), countBefore);
+  assert.deepEqual(ordersSnapshot(), ordersBefore);
 });
 
 test('orders API: accepts valid email variants and positive safe integer cents', async () => {
@@ -225,4 +229,131 @@ test('revenue API: a 10000-cent sale minus a 2000-cent refund returns 8000 cents
       revenue: 80,
     },
   });
+});
+
+test('orders API: shared customer, amount and date never grant access to another merchant', async () => {
+  const merchants = ['m_matrix_a', 'm_matrix_b', 'm_matrix_c'];
+  const fixtures = merchants.flatMap((merchantId, index) => {
+    db.prepare('INSERT INTO merchants (id, name) VALUES (?, ?)').run(merchantId, merchantId);
+    return (['sale', 'refund'] as const).map((type, offset) => ordersDal.create({
+      id: `o_matrix_${index * 2 + offset}`,
+      merchant_id: merchantId,
+      customer_email: 'shared@example.com',
+      total_amount: 1000,
+      type,
+      status: 'completed',
+    }));
+  });
+  for (const order of fixtures) {
+    db.prepare('UPDATE orders SET created_at = ? WHERE id = ?')
+      .run('2026-01-15T12:00:00.000Z', order.id);
+  }
+
+  for (const merchantId of merchants) {
+    const ownIds = fixtures.filter((order) => order.merchant_id === merchantId).map((order) => order.id).sort();
+    for (const query of ['', '?from=2026-01-15&to=2026-01-16']) {
+      const listed = await request(`/api/orders${query}`, merchantId);
+      assert.equal(listed.status, 200);
+      assert.deepEqual(listed.body.orders.map((order: { id: string }) => order.id).sort(), ownIds);
+      assert.ok(listed.body.orders.every((order: { merchant_id: string }) => order.merchant_id === merchantId));
+    }
+    for (const order of fixtures) {
+      // A query parameter must not override the merchant selected by the middleware.
+      const result = await request(`/api/orders/${order.id}?merchant_id=${order.merchant_id}`, merchantId);
+      if (order.merchant_id === merchantId) {
+        assert.equal(result.status, 200);
+        assert.equal(result.body.order.id, order.id);
+        assert.equal(result.body.order.merchant_id, merchantId);
+      } else {
+        assert.deepEqual(result, { status: 404, body: { error: 'not_found' } });
+      }
+    }
+  }
+});
+
+test('orders API: payload merchant_id cannot create or expose orders in another merchant', async () => {
+  const beforeBistro = await request('/api/orders', 'm_bistro');
+  const created = await request('/api/orders', 'm_acme', 'POST', {
+    ...validPayload, merchant_id: 'm_bistro',
+  });
+  assert.equal(created.status, 201);
+  assert.equal(created.body.order.merchant_id, 'm_acme');
+  assert.equal((await request(`/api/orders/${created.body.order.id}`, 'm_acme')).status, 200);
+  assert.deepEqual(await request(`/api/orders/${created.body.order.id}`, 'm_bistro'), {
+    status: 404,
+    body: { error: 'not_found' },
+  });
+  assert.deepEqual(await request('/api/orders', 'm_bistro'), beforeBistro);
+});
+
+test('API: a nonexistent merchant gets 401 regardless of resource existence or valid JSON payload', async () => {
+  const ordersBefore = ordersSnapshot();
+  const cases: Array<[string, string, unknown]> = [
+    ['GET', '/api/orders', undefined],
+    ['GET', '/api/orders?from=2000-01-01&to=2100-01-01', undefined],
+    ['GET', '/api/orders/o_m_acme', undefined],
+    ['GET', '/api/orders/o_missing', undefined],
+    ['GET', '/api/revenue?from=2000-01-01&to=2100-01-01', undefined],
+    ['POST', '/api/orders', validPayload],
+    ['POST', '/api/orders', { ...validPayload, merchant_id: 'm_acme' }],
+    ['POST', '/api/orders', { ...validPayload, total_amount: -1 }],
+  ];
+  for (const [method, path, payload] of cases) {
+    assert.deepEqual(await request(path, 'm_nonexistent', method, payload), {
+      status: 401,
+      body: { error: 'invalid_merchant_id' },
+    }, `${method} ${path}`);
+  }
+  assert.deepEqual(ordersSnapshot(), ordersBefore);
+});
+
+test('API: an existing merchant with no orders is authenticated, not treated as nonexistent', async () => {
+  const merchantId = 'm_empty';
+  db.prepare('INSERT INTO merchants (id, name) VALUES (?, ?)').run(merchantId, 'Empty');
+  assert.deepEqual(await request('/api/orders', merchantId), { status: 200, body: { orders: [] } });
+  assert.deepEqual(await request('/api/orders/o_m_acme', merchantId), {
+    status: 404, body: { error: 'not_found' },
+  });
+  const revenue = await request('/api/revenue?from=2000-01-01&to=2100-01-01', merchantId);
+  assert.equal(revenue.status, 200);
+  assert.equal(revenue.body.merchant_id, merchantId);
+  assert.equal(revenue.body.revenue_cents, 0);
+  const created = await request('/api/orders', merchantId, 'POST', validPayload);
+  assert.equal(created.status, 201);
+  assert.equal(created.body.order.merchant_id, merchantId);
+});
+
+test('revenue API: other merchants and rejected refunds cannot change a merchant balance', async () => {
+  const merchantId = 'm_balance';
+  const otherMerchantId = 'm_balance_other';
+  for (const id of [merchantId, otherMerchantId]) {
+    db.prepare('INSERT INTO merchants (id, name) VALUES (?, ?)').run(id, id);
+  }
+  const path = '/api/revenue?from=2000-01-01&to=2100-01-01';
+  for (const [type, total_amount] of [['sale', 1055], ['refund', 56]] as const) {
+    assert.equal((await request('/api/orders', merchantId, 'POST', {
+      ...validPayload, type, total_amount,
+    })).status, 201);
+  }
+  const expected = await request(path, merchantId);
+  assert.equal(expected.status, 200);
+  assert.equal(expected.body.revenue_cents, 999);
+  assert.equal(expected.body.revenue, 9.99);
+
+  for (const type of ['sale', 'refund']) {
+    assert.equal((await request('/api/orders', otherMerchantId, 'POST', {
+      ...validPayload, type, total_amount: 50000,
+    })).status, 201);
+    assert.deepEqual(await request(path, merchantId), expected);
+  }
+  assert.deepEqual(await request(`${path}&merchant_id=${otherMerchantId}`, merchantId), expected);
+
+  const ordersBefore = ordersSnapshot();
+  for (const total_amount of [-1000, 0, 0.5, '1000', Number.MAX_SAFE_INTEGER + 1]) {
+    assert.deepEqual(await request('/api/orders', merchantId, 'POST', {
+      ...validPayload, type: 'refund', total_amount,
+    }), { status: 400, body: { error: 'invalid_body' } });
+    assert.deepEqual(await request(path, merchantId), expected);
+  }
+  assert.deepEqual(ordersSnapshot(), ordersBefore);
 });
