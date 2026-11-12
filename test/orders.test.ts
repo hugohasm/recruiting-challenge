@@ -23,9 +23,10 @@ test('orders DAL: create + listByMerchant returns the order', () => {
   assert.equal(list[0]!.total_amount, 5000);
 });
 
-test('orders DAL: getById returns the order', () => {
+test('orders DAL: getById only returns an order belonging to the merchant', () => {
   initSchema();
   db.prepare(`INSERT OR IGNORE INTO merchants (id, name) VALUES ('m_test', 'Test')`).run();
+  db.prepare(`INSERT OR IGNORE INTO merchants (id, name) VALUES ('m_other', 'Other')`).run();
   ordersDal.create({
     id: 'o2',
     merchant_id: 'm_test',
@@ -34,6 +35,9 @@ test('orders DAL: getById returns the order', () => {
     type: 'sale',
     status: 'completed',
   });
-  const got = ordersDal.getById('o2');
+  const got = ordersDal.getById('m_test', 'o2');
   assert.equal(got?.total_amount, 1200);
+  assert.equal(got?.merchant_id, 'm_test');
+  assert.equal(ordersDal.getById('m_other', 'o2'), undefined);
+  assert.equal(ordersDal.getById('m_test', 'o_missing'), undefined);
 });
